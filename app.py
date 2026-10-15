@@ -288,7 +288,7 @@ def generate_docx_report(patient_data, clinical_result, image_result, ai_analysi
 
     doc.add_paragraph("")
 
-    # AI Agent Analysis
+    # AI Agent Analysise
     doc.add_heading("AI Agent Analysis & Documentation", level=1)
 
     if ai_analysis.get("summary"):
