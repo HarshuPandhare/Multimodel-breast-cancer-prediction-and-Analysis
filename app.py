@@ -7,19 +7,33 @@ import joblib
 import pandas as pd
 import torch
 import torch.nn as nn
-from flask import Flask, render_template, request, send_from_directory, jsonify, send_file
+from functools import wraps
+from contextlib import contextmanager
+from flask import Flask, render_template, request, send_from_directory, jsonify, send_file, redirect, url_for, session, flash
 from torchvision import models, transforms
 from PIL import Image
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
 from google import genai
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+import hmac
+import threading
 
 load_dotenv()
 
 app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY") or os.urandom(32)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true",
+)
+
+database_initialized = False
+database_initialization_lock = threading.Lock()
 
 CLINICAL_MODEL_PATH = "models/breast_cancer_model.pkl"
 IMAGE_MODEL_PATH = "models/breast_cancer_efficientnet.pth"
@@ -91,6 +105,171 @@ def encode_marker(value):
 
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def connect_database():
+    database_url = os.getenv("DATABASE_URL")
+    connection_options = None
+    if not database_url:
+        connection_options = {
+            "host": os.getenv("PGHOST", "localhost"),
+            "port": os.getenv("PGPORT", "5432"),
+            "dbname": os.getenv("PGDATABASE"),
+            "user": os.getenv("PGUSER"),
+            "password": os.getenv("PGPASSWORD"),
+        }
+        missing_options = [key for key, value in connection_options.items() if not value]
+        if missing_options:
+            raise RuntimeError(
+                "Set DATABASE_URL or the PostgreSQL settings: "
+                + ", ".join("PG" + key.upper() for key in missing_options)
+                + "."
+            )
+
+    try:
+        import psycopg
+        if database_url:
+            return psycopg.connect(database_url)
+        return psycopg.connect(**connection_options)
+    except ImportError:
+        try:
+            import psycopg2
+            if database_url:
+                return psycopg2.connect(database_url)
+            return psycopg2.connect(**connection_options)
+        except ImportError as error:
+            raise RuntimeError(
+                'Install a PostgreSQL driver with: pip install "psycopg[binary]"'
+            ) from error
+
+
+@contextmanager
+def database_connection():
+    connection = connect_database()
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def ensure_database():
+    global database_initialized
+    if database_initialized:
+        return
+
+    with database_initialization_lock:
+        if database_initialized:
+            return
+
+        with database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS app_users (
+                        id BIGSERIAL PRIMARY KEY,
+                        username TEXT NOT NULL UNIQUE,
+                        password_hash TEXT NOT NULL,
+                        role TEXT NOT NULL CHECK (role IN ('admin', 'patient')),
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS analysis_reports (
+                        id TEXT PRIMARY KEY,
+                        patient_id BIGINT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+                        payload JSONB NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS medical_requests (
+                        id BIGSERIAL PRIMARY KEY,
+                        patient_id BIGINT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+                        message TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'Open',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS analysis_reports_patient_created_idx
+                    ON analysis_reports (patient_id, created_at DESC)
+                """)
+
+                admin_username = os.getenv("ADMIN_USERNAME")
+                admin_password = os.getenv("ADMIN_PASSWORD")
+                if not admin_username or not admin_password:
+                    raise RuntimeError("Set ADMIN_USERNAME and ADMIN_PASSWORD before starting the app.")
+                admin_username = admin_username.strip()
+                if not admin_username:
+                    raise RuntimeError("ADMIN_USERNAME cannot be empty.")
+                if len(admin_password) < 12:
+                    raise RuntimeError("ADMIN_PASSWORD must be at least 12 characters.")
+                cursor.execute(
+                    """INSERT INTO app_users (username, password_hash, role)
+                       VALUES (%s, %s, 'admin') ON CONFLICT (username) DO NOTHING""",
+                    (admin_username, generate_password_hash(admin_password))
+                )
+                cursor.execute("SELECT role FROM app_users WHERE username = %s", (admin_username,))
+                if cursor.fetchone()[0] != "admin":
+                    raise RuntimeError("ADMIN_USERNAME is already assigned to a non-admin account.")
+
+        database_initialized = True
+
+
+def get_csrf_token():
+    if "csrf_token" not in session:
+        session["csrf_token"] = uuid.uuid4().hex
+    return session["csrf_token"]
+
+
+@app.context_processor
+def inject_template_helpers():
+    return {"csrf_token": get_csrf_token}
+
+
+@app.before_request
+def prepare_request():
+    ensure_database()
+    if request.method == "POST":
+        expected_token = session.get("csrf_token", "")
+        supplied_token = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token", "")
+        if (not expected_token or not supplied_token or
+                not hmac.compare_digest(str(expected_token), str(supplied_token))):
+            return "Invalid or missing CSRF token.", 400
+
+
+def require_role(role):
+    def decorator(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            if session.get("role") != role:
+                if not session.get("user_id"):
+                    return redirect(url_for("login"))
+                return redirect(url_for("patient_portal" if session.get("role") == "patient" else "home"))
+            return view(*args, **kwargs)
+        return wrapped
+    return decorator
+
+
+def get_json_payload(value):
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def load_patient_analysis_history(patient_id):
+    with database_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT id, payload, created_at FROM analysis_reports
+                   WHERE patient_id = %s ORDER BY created_at DESC LIMIT 50""",
+                (patient_id,)
+            )
+            return [
+                {"id": row[0], "payload": get_json_payload(row[1]), "created_at": row[2]}
+                for row in cursor.fetchall()
+            ]
 
 
 def predict_image(image_path):
@@ -347,7 +526,43 @@ def generate_docx_report(patient_data, clinical_result, image_result, ai_analysi
     return filepath
 
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if session.get("user_id"):
+        return redirect(url_for("patient_portal" if session.get("role") == "patient" else "home"))
+
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        with database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id, username, password_hash, role FROM app_users WHERE username = %s",
+                    (username,)
+                )
+                user = cursor.fetchone()
+
+        if user and check_password_hash(user[2], password):
+            session.clear()
+            session["user_id"] = user[0]
+            session["username"] = user[1]
+            session["role"] = user[3]
+            get_csrf_token()
+            return redirect(url_for("patient_portal" if user[3] == "patient" else "home"))
+
+        flash("Username or password is incorrect.", "error")
+
+    return render_template("login.html")
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
 @app.route("/", methods=["GET", "POST"])
+@require_role("admin")
 def home():
     clinical_prediction = None
     clinical_confidence = None
@@ -358,9 +573,61 @@ def home():
     uploaded_image = None
     error = None
     report = None
+    analysis_id = None
+    ai_analysis = None
+    patients = []
+    selected_patient = None
+    medical_requests = []
+    analysis_history = []
+
+    with database_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, username FROM app_users WHERE role = 'patient' ORDER BY username"
+            )
+            patients = [{"id": row[0], "username": row[1]} for row in cursor.fetchall()]
+
+            selected_patient_id = request.form.get("patient_id") if request.method == "POST" else request.args.get("patient_id")
+            if selected_patient_id is None:
+                selected_patient_id = session.get("selected_patient_id")
+
+            try:
+                selected_patient_id = int(selected_patient_id) if selected_patient_id else None
+            except (TypeError, ValueError):
+                selected_patient_id = None
+
+            if selected_patient_id:
+                cursor.execute(
+                    "SELECT id, username FROM app_users WHERE id = %s AND role = 'patient'",
+                    (selected_patient_id,)
+                )
+                patient_row = cursor.fetchone()
+                if patient_row:
+                    selected_patient = {"id": patient_row[0], "username": patient_row[1]}
+                    session["selected_patient_id"] = patient_row[0]
+                else:
+                    session.pop("selected_patient_id", None)
+            else:
+                session.pop("selected_patient_id", None)
+
+            cursor.execute("""
+                SELECT r.id, r.patient_id, u.username, r.message, r.status, r.created_at
+                FROM medical_requests r
+                JOIN app_users u ON u.id = r.patient_id
+                ORDER BY r.created_at DESC
+                LIMIT 50
+            """)
+            medical_requests = [
+                {"id": row[0], "patient_id": row[1], "username": row[2],
+                 "message": row[3], "status": row[4], "created_at": row[5]}
+                for row in cursor.fetchall()
+            ]
 
     if request.method == "POST":
         try:
+            if not selected_patient:
+                raise ValueError("Select a patient before running an analysis.")
+
             er_status = request.form.get("er_status")
             pr_status = request.form.get("pr_status")
             her2_status = request.form.get("her2_status")
@@ -421,8 +688,75 @@ def home():
 
                 image_prediction, image_confidence, image_probabilities = predict_image(image_path)
 
+            analysis_id = uuid.uuid4().hex
+            patient_data = {
+                "er_status": er_status,
+                "pr_status": pr_status,
+                "her2_status": her2_status,
+                "age": age,
+                "tumor_size": tumor_size,
+                "lymph_nodes": lymph_nodes,
+            }
+            clinical_result = {
+                "prediction": str(clinical_prediction),
+                "confidence": clinical_confidence,
+                "probabilities": clinical_probabilities,
+            }
+            image_result = None
+            if image_prediction:
+                image_result = {
+                    "prediction": image_prediction,
+                    "confidence": image_confidence,
+                    "probabilities": image_probabilities,
+                }
+            saved_payload = {
+                "patient_data": patient_data,
+                "clinical_result": clinical_result,
+                "image_result": image_result,
+                "report": report,
+                "uploaded_image": uploaded_image,
+                "ai_analysis": None,
+            }
+            with database_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """INSERT INTO analysis_reports (id, patient_id, payload)
+                           VALUES (%s, %s, %s::jsonb)""",
+                        (analysis_id, selected_patient["id"], json.dumps(saved_payload))
+                    )
         except Exception as e:
             error = str(e)
+            analysis_id = None
+
+    if selected_patient:
+        analysis_history = load_patient_analysis_history(selected_patient["id"])
+        if request.method == "GET" and analysis_history:
+            requested_analysis_id = request.args.get("analysis_id")
+            saved_analysis = next(
+                (item for item in analysis_history if item["id"] == requested_analysis_id),
+                analysis_history[0]
+            )
+            analysis_id = saved_analysis["id"]
+            payload = saved_analysis["payload"]
+            patient_data = payload.get("patient_data", {})
+            clinical_result = payload.get("clinical_result", {})
+            image_result = payload.get("image_result")
+            report = payload.get("report") or {
+                "ER": patient_data.get("er_status"),
+                "PR": patient_data.get("pr_status"),
+                "HER2": patient_data.get("her2_status"),
+                "Age": patient_data.get("age"),
+                "Tumor Size": patient_data.get("tumor_size"),
+                "Lymph Nodes": patient_data.get("lymph_nodes"),
+            }
+            clinical_prediction = clinical_result.get("prediction")
+            clinical_confidence = clinical_result.get("confidence")
+            clinical_probabilities = clinical_result.get("probabilities")
+            image_prediction = image_result.get("prediction") if image_result else None
+            image_confidence = image_result.get("confidence") if image_result else None
+            image_probabilities = image_result.get("probabilities") if image_result else None
+            uploaded_image = payload.get("uploaded_image")
+            ai_analysis = payload.get("ai_analysis")
 
     return render_template(
         "index.html",
@@ -435,11 +769,109 @@ def home():
         uploaded_image=uploaded_image,
         error=error,
         report=report,
-        clinical_accuracy=round(clinical_accuracy * 100, 2)
+        clinical_accuracy=round(clinical_accuracy * 100, 2),
+        patients=patients,
+        selected_patient=selected_patient,
+        medical_requests=medical_requests,
+        analysis_id=analysis_id,
+        ai_analysis=ai_analysis,
+        analysis_history=analysis_history,
     )
 
 
+@app.route("/admin/patients", methods=["POST"])
+@require_role("admin")
+def create_patient():
+    username = request.form.get("username", "").strip()
+    password = request.form.get("password", "")
+    if not username or len(username) > 100:
+        flash("Enter a username of up to 100 characters.", "error")
+        return redirect(url_for("home"))
+    if len(password) < 12:
+        flash("Patient passwords must be at least 12 characters.", "error")
+        return redirect(url_for("home"))
+
+    try:
+        with database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO app_users (username, password_hash, role)
+                       VALUES (%s, %s, 'patient') RETURNING id""",
+                    (username, generate_password_hash(password))
+                )
+                patient_id = cursor.fetchone()[0]
+    except Exception as error:
+        if getattr(error, "sqlstate", None) == "23505" or getattr(error, "pgcode", None) == "23505":
+            flash("That username is already in use.", "error")
+            return redirect(url_for("home"))
+        raise
+
+    flash("Patient account created. Share the username and password securely.", "success")
+    return redirect(url_for("home", patient_id=patient_id))
+
+
+@app.route("/admin/requests/<int:request_id>/close", methods=["POST"])
+@require_role("admin")
+def close_medical_request(request_id):
+    with database_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE medical_requests SET status = 'Reviewed' WHERE id = %s",
+                (request_id,)
+            )
+    return redirect(url_for("home"))
+
+
+@app.route("/patient")
+@require_role("patient")
+def patient_portal():
+    with database_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT id, payload, created_at FROM analysis_reports
+                   WHERE patient_id = %s ORDER BY created_at DESC""",
+                (session["user_id"],)
+            )
+            reports = [
+                {"id": row[0], "payload": get_json_payload(row[1]), "created_at": row[2]}
+                for row in cursor.fetchall()
+            ]
+            cursor.execute(
+                """SELECT message, status, created_at FROM medical_requests
+                   WHERE patient_id = %s ORDER BY created_at DESC""",
+                (session["user_id"],)
+            )
+            medical_requests = [
+                {"message": row[0], "status": row[1], "created_at": row[2]}
+                for row in cursor.fetchall()
+            ]
+    return render_template(
+        "patient.html",
+        reports=reports,
+        medical_requests=medical_requests,
+        username=session.get("username"),
+    )
+
+
+@app.route("/patient/requests", methods=["POST"])
+@require_role("patient")
+def request_medical_attention():
+    message = request.form.get("message", "").strip()
+    if not message or len(message) > 1000:
+        flash("Enter a message of up to 1,000 characters.", "error")
+    else:
+        with database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO medical_requests (patient_id, message) VALUES (%s, %s)",
+                    (session["user_id"], message)
+                )
+        flash("Your request has been sent to the care team.", "success")
+    return redirect(url_for("patient_portal"))
+
+
 @app.route("/generate-report", methods=["POST"])
+@require_role("admin")
 def generate_report():
     """API endpoint to generate AI documentation report."""
     try:
@@ -447,9 +879,26 @@ def generate_report():
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
-        patient_data = data.get("patient_data", {})
-        clinical_result = data.get("clinical_result", {})
-        image_result = data.get("image_result", None)
+        analysis_id = data.get("analysis_id")
+        selected_patient_id = session.get("selected_patient_id")
+        if not analysis_id or not selected_patient_id:
+            return jsonify({"error": "Select a patient and run an analysis first."}), 400
+
+        with database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """SELECT payload FROM analysis_reports
+                       WHERE id = %s AND patient_id = %s""",
+                    (analysis_id, selected_patient_id)
+                )
+                row = cursor.fetchone()
+        if not row:
+            return jsonify({"error": "Analysis not found for the selected patient."}), 404
+
+        saved_payload = get_json_payload(row[0])
+        patient_data = saved_payload["patient_data"]
+        clinical_result = saved_payload["clinical_result"]
+        image_result = saved_payload["image_result"]
 
         # Build prompt and call Gemini
         prompt = build_gemini_prompt(patient_data, clinical_result, image_result)
@@ -457,16 +906,21 @@ def generate_report():
         ai_analysis = parse_gemini_response(raw_response)
 
         # Generate .docx report
-        report_id = uuid.uuid4().hex
-        report_path = generate_docx_report(
-            patient_data, clinical_result, image_result, ai_analysis, report_id
-        )
+        generate_docx_report(patient_data, clinical_result, image_result, ai_analysis, analysis_id)
+        saved_payload["ai_analysis"] = ai_analysis
+        with database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """UPDATE analysis_reports SET payload = %s::jsonb
+                       WHERE id = %s AND patient_id = %s""",
+                    (json.dumps(saved_payload), analysis_id, selected_patient_id)
+                )
 
         return jsonify({
             "success": True,
-            "report_id": report_id,
+            "report_id": analysis_id,
             "ai_analysis": ai_analysis,
-            "download_url": f"/download-report/{report_id}"
+            "download_url": f"/download-report/{analysis_id}"
         })
 
     except Exception as e:
@@ -476,8 +930,28 @@ def generate_report():
 @app.route("/download-report/<report_id>")
 def download_report(report_id):
     """Download a generated .docx report."""
+    if not session.get("user_id"):
+        return redirect(url_for("login"))
+    if session.get("role") not in ("admin", "patient"):
+        return redirect(url_for("login"))
+
     # Sanitize report_id to prevent path traversal
     safe_id = secure_filename(report_id)
+    if safe_id != report_id:
+        return "Report not found", 404
+
+    with database_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT patient_id FROM analysis_reports WHERE id = %s",
+                (safe_id,)
+            )
+            report_row = cursor.fetchone()
+    if not report_row:
+        return "Report not found", 404
+    if session.get("role") == "patient" and report_row[0] != session.get("user_id"):
+        return "Report not found", 404
+
     filename = f"breast_cancer_report_{safe_id}.docx"
     filepath = os.path.join(REPORT_FOLDER, filename)
 
@@ -488,9 +962,14 @@ def download_report(report_id):
 
 
 @app.route("/uploads/<filename>")
+@require_role("admin")
 def uploaded_file(filename):
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="127.0.0.1", port=5000)
+    app.run(
+        debug=os.getenv("FLASK_DEBUG", "false").lower() == "true",
+        host="127.0.0.1",
+        port=5000,
+    )

@@ -1,5 +1,37 @@
+
+# Environment variables and secrets
 .env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache and compiled files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# IDE settings
+.vscode/
+.idea/
+
+# Generated uploads and reports
 uploads/
+reports/*.docx
+
+# Dataset and training files
 data/
+train2.py
+train3.py
+
+# Logs and system files
+*.log
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak

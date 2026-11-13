@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My health reports | Cancer AI Analysis</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; background: #f2f6f7; color: #0d2230; font: 16px/1.6 "Segoe UI", Arial, sans-serif; }
+        header { padding: 14px 24px; background: white; border-bottom: 1px solid #dbe4e8; display: flex; justify-content: space-between; align-items: center; }
+        header strong { font-size: 18px; }
+        main { width: min(100% - 32px, 960px); margin: 32px auto; }
+        .card { margin-bottom: 20px; background: white; border: 1px solid #dbe4e8; border-radius: 12px; overflow: hidden; }
+        .card h2, .card h3 { margin: 0; }
+        .card-title { padding: 18px 22px; border-bottom: 1px solid #e9eff2; }
+        .card-body { padding: 22px; }
+        .report { padding: 22px; border-bottom: 1px solid #e9eff2; }
+        .report:last-child { border-bottom: 0; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 16px 0; }
+        .value { padding: 12px; background: #f6f9fa; border-radius: 8px; }
+        .value span { display: block; color: #566b79; font-size: 13px; }
+        .ai { margin-top: 16px; padding: 16px; background: #f3f3fb; border-radius: 8px; }
+        .ai p { white-space: pre-wrap; }
+        .notice { padding: 14px; background: #fdf4e3; border-radius: 8px; color: #684207; }
+        label { display: block; margin: 12px 0 6px; font-weight: 600; }
+        textarea { width: 100%; min-height: 110px; padding: 12px; border: 1px solid #dbe4e8; border-radius: 8px; font: inherit; }
+        button, .button { display: inline-block; padding: 10px 16px; border: 0; border-radius: 8px; background: #0d2230; color: white; text-decoration: none; font: inherit; font-weight: 600; cursor: pointer; }
+        .muted { color: #566b79; font-size: 14px; }
+        .flash { margin: 0 0 16px; padding: 12px; background: #e3f3f2; border-radius: 8px; }
+        :focus-visible { outline: 3px solid #0e7c7b; outline-offset: 2px; }
+    </style>
+</head>
+<body>
+    <header>
+        <strong>Cancer AI Analysis · Patient portal</strong>
+        <form method="POST" action="{{ url_for('logout') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit">Log out</button>
+        </form>
+    </header>
+    <main>
+        <h1>Hello, {{ username }}</h1>
+        <p class="muted">View reports shared with your account and contact the care team.</p>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}
+        <div class="flash" role="status">{{ message }}</div>
+        {% endfor %}
+        {% endwith %}
+
+        <section class="card">
+            <div class="card-title"><h2>My reports</h2></div>
+            {% if reports %}
+            {% for item in reports %}
+            {% set data = item.payload %}
+            {% set patient = data.patient_data %}
+            {% set clinical = data.clinical_result %}
+            <article class="report">
+                <h3>Analysis from {{ item.created_at.strftime("%Y-%m-%d %H:%M") }}</h3>
+                <div class="grid">
+                    <div class="value"><span>ER</span>{{ patient.er_status }}</div>
+                    <div class="value"><span>PR</span>{{ patient.pr_status }}</div>
+                    <div class="value"><span>HER2</span>{{ patient.her2_status }}</div>
+                    <div class="value"><span>Age at diagnosis</span>{{ patient.age }}</div>
+                    <div class="value"><span>Tumor size</span>{{ patient.tumor_size }} mm</div>
+                    <div class="value"><span>Positive lymph nodes</span>{{ patient.lymph_nodes }}</div>
+                    <div class="value"><span>Predicted PAM50 subtype</span>{{ clinical.prediction }}</div>
+                    <div class="value"><span>Clinical model confidence</span>{{ clinical.confidence }}%</div>
+                    {% if data.image_result %}
+                    <div class="value"><span>Ultrasound model result</span>{{ data.image_result.prediction }} · {{ data.image_result.confidence }}%</div>
+                    {% endif %}
+                </div>
+                {% if data.ai_analysis %}
+                <div class="ai">
+                    <h3>AI-generated report</h3>
+                    <p><strong>Summary:</strong> {{ data.ai_analysis.summary }}</p>
+                    <p><strong>Risk assessment:</strong> {{ data.ai_analysis.risk_assessment }}</p>
+                    {% if data.ai_analysis.subtype_analysis %}
+                    <p><strong>Subtype analysis:</strong> {{ data.ai_analysis.subtype_analysis }}</p>
+                    {% endif %}
+                    {% if data.ai_analysis.biomarker_interpretation %}
+                    <p><strong>Biomarker interpretation:</strong> {{ data.ai_analysis.biomarker_interpretation }}</p>
+                    {% endif %}
+                    {% if data.ai_analysis.treatment_considerations %}
+                    <p><strong>Treatment considerations:</strong> {{ data.ai_analysis.treatment_considerations }}</p>
+                    {% endif %}
+                    {% if data.ai_analysis.recommended_actions %}
+                    <strong>Recommended follow-up topics</strong>
+                    <ul>{% for action in data.ai_analysis.recommended_actions %}<li>{{ action }}</li>{% endfor %}</ul>
+                    {% endif %}
+                    {% if data.ai_analysis.additional_tests %}
+                    <strong>Additional tests mentioned</strong>
+                    <ul>{% for test in data.ai_analysis.additional_tests %}<li>{{ test }}</li>{% endfor %}</ul>
+                    {% endif %}
+                    {% if data.ai_analysis.follow_up_plan %}
+                    <p><strong>Follow-up plan:</strong> {{ data.ai_analysis.follow_up_plan }}</p>
+                    {% endif %}
+                    {% if data.ai_analysis.confidence_notes %}
+                    <p><strong>Confidence and limitations:</strong> {{ data.ai_analysis.confidence_notes }}</p>
+                    {% endif %}
+                    <a class="button" href="{{ url_for('download_report', report_id=item.id) }}">Download report</a>
+                </div>
+                {% else %}
+                <p class="muted">The care team has not completed the written report yet.</p>
+                {% endif %}
+            </article>
+            {% endfor %}
+            {% else %}
+            <div class="card-body"><p>No reports have been shared with you yet.</p></div>
+            {% endif %}
+        </section>
+
+        <section class="card">
+            <div class="card-title"><h2>Request medical attention</h2></div>
+            <div class="card-body">
+                <p class="notice">This form is not for emergencies. If you may be experiencing a medical emergency, contact your local emergency services or care team directly.</p>
+                <form method="POST" action="{{ url_for('request_medical_attention') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <label for="message">How can the care team help?</label>
+                    <textarea id="message" name="message" maxlength="1000" required></textarea>
+                    <button type="submit">Send request</button>
+                </form>
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-title"><h2>My requests</h2></div>
+            <div class="card-body">
+                {% if medical_requests %}
+                {% for item in medical_requests %}
+                <p><strong>{{ item.status }}</strong> · {{ item.created_at.strftime("%Y-%m-%d %H:%M") }}<br>{{ item.message }}</p>
+                {% endfor %}
+                {% else %}
+                <p>You have not sent a request yet.</p>
+                {% endif %}
+            </div>
+        </section>
+        <p class="notice">These machine-learning predictions and AI-generated text are informational only, not a medical diagnosis or treatment recommendation. Please discuss all results with a qualified healthcare professional.</p>
+    </main>
+</body>
+</html>

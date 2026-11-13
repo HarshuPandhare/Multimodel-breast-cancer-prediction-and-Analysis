@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign in | Cancer AI Analysis</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; background: #f2f6f7; color: #0d2230; font: 16px/1.6 "Segoe UI", Arial, sans-serif; }
+        .panel { width: min(100%, 440px); background: white; padding: 36px; border: 1px solid #dbe4e8; border-radius: 14px; box-shadow: 0 16px 48px rgba(13, 34, 48, .08); }
+        h1 { margin: 0 0 8px; font-size: 28px; }
+        p { color: #566b79; margin: 0 0 24px; }
+        label { display: block; margin: 16px 0 6px; font-weight: 600; }
+        input { width: 100%; padding: 12px; border: 1px solid #dbe4e8; border-radius: 8px; font: inherit; }
+        button { width: 100%; margin-top: 24px; padding: 12px; border: 0; border-radius: 8px; background: #0d2230; color: white; font: inherit; font-weight: 700; cursor: pointer; }
+        .message { margin: 14px 0; padding: 10px 12px; border-radius: 8px; background: #fdeceb; color: #8d201b; }
+        .note { margin-top: 20px; font-size: 13px; }
+        :focus-visible { outline: 3px solid #0e7c7b; outline-offset: 2px; }
+    </style>
+</head>
+<body>
+    <main class="panel">
+        <h1>Cancer AI Analysis</h1>
+        <p>Sign in with your admin or patient account.</p>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}
+        <div class="message" role="alert">{{ message }}</div>
+        {% endfor %}
+        {% endwith %}
+        <form method="POST" action="{{ url_for('login') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label for="username">Username</label>
+            <input id="username" name="username" autocomplete="username" required autofocus>
+            <label for="password">Password</label>
+            <input id="password" type="password" name="password" autocomplete="current-password" required>
+            <button type="submit">Sign in</button>
+        </form>
+        <p class="note">Patient accounts are created by the care team. If you need access, please contact your administrator.</p>
+    </main>
+</body>
+</html>

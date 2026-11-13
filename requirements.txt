@@ -1,0 +1,12 @@
+flask
+pandas
+numpy
+joblib
+torch
+torchvision
+pillow
+google-genai
+python-docx
+pydantic
+python-dotenv
+psycopg[binary]
