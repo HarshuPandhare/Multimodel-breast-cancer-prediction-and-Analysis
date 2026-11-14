@@ -83,12 +83,18 @@ image_transform = transforms.Compose([
 # --- Gemini AI Agent Setup ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.7-flash")
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
 
 gemini_client = None
 if GEMINI_API_KEY:
     try:
-        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+        gemini_client = genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options=genai.types.HttpOptions(
+                timeout=60_000,
+                retry_options=genai.types.HttpRetryOptions(attempts=1),
+            ),
+        )
         print(f"Gemini AI agent initialized with model: {GEMINI_MODEL}")
     except Exception as e:
         print(f"Warning: Failed to initialize Gemini client: {e}")
@@ -109,38 +115,26 @@ def allowed_file(filename):
 
 def connect_database():
     database_url = os.getenv("DATABASE_URL")
-    connection_options = None
-    if not database_url:
-        connection_options = {
-            "host": os.getenv("PGHOST", "localhost"),
-            "port": os.getenv("PGPORT", "5432"),
-            "dbname": os.getenv("PGDATABASE"),
-            "user": os.getenv("PGUSER"),
-            "password": os.getenv("PGPASSWORD"),
-        }
-        missing_options = [key for key, value in connection_options.items() if not value]
-        if missing_options:
-            raise RuntimeError(
-                "Set DATABASE_URL or the PostgreSQL settings: "
-                + ", ".join("PG" + key.upper() for key in missing_options)
-                + "."
-            )
+    import psycopg
+    if database_url:
+        return psycopg.connect(database_url)
 
-    try:
-        import psycopg
-        if database_url:
-            return psycopg.connect(database_url)
-        return psycopg.connect(**connection_options)
-    except ImportError:
-        try:
-            import psycopg2
-            if database_url:
-                return psycopg2.connect(database_url)
-            return psycopg2.connect(**connection_options)
-        except ImportError as error:
-            raise RuntimeError(
-                'Install a PostgreSQL driver with: pip install "psycopg[binary]"'
-            ) from error
+    connection_options = {
+        "host": os.getenv("PGHOST", "localhost"),
+        "port": os.getenv("PGPORT", "5432"),
+        "dbname": os.getenv("PGDATABASE"),
+        "user": os.getenv("PGUSER"),
+        "password": os.getenv("PGPASSWORD"),
+    }
+    missing_options = [key for key, value in connection_options.items() if not value]
+    if missing_options:
+        raise RuntimeError(
+            "Set DATABASE_URL or the PostgreSQL settings: "
+            + ", ".join("PG" + key.upper() for key in missing_options)
+            + "."
+        )
+
+    return psycopg.connect(**connection_options)
 
 
 @contextmanager
@@ -372,6 +366,7 @@ def call_gemini_agent(prompt):
         raise ValueError("Gemini AI agent not configured. Check your GEMINI_API_KEY in .env")
 
     models_to_try = [GEMINI_MODEL, GEMINI_FALLBACK_MODEL]
+    last_error = None
 
     for model_name in models_to_try:
         try:
@@ -379,12 +374,17 @@ def call_gemini_agent(prompt):
                 model=model_name,
                 contents=prompt
             )
-            return response.text
-        except Exception as e:
-            print(f"Gemini model {model_name} failed: {e}")
-            continue
+            response_text = response.text
+            if not response_text or not response_text.strip():
+                raise RuntimeError(f"Gemini model {model_name} returned an empty response.")
+            return response_text
+        except Exception as error:
+            last_error = error
+            print(f"Gemini model {model_name} failed: {error}")
 
-    raise RuntimeError("All Gemini models failed. Please check your API key and model names.")
+    raise RuntimeError(
+        f"Gemini report generation failed for both configured models. Last error: {last_error}"
+    ) from last_error
 
 
 def parse_gemini_response(response_text):

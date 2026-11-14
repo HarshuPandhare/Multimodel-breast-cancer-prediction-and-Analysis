@@ -10,3 +10,6 @@ python-docx
 pydantic
 python-dotenv
 psycopg[binary]
+scikit-learn==1.9.0
+matplotlib
+seaborn

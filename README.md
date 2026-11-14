@@ -161,6 +161,8 @@ Create a `.env` file in the project root and add your Google Gemini API key:
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-3.8-flash
+GEMINI_FALLBACK_MODEL=gemini-3.6-flash
 ```
 
 Use the exact environment variable name expected by `app.py`. If the application uses a different name, update this example accordingly.

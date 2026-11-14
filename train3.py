@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from torchvision import datasets, transforms, models
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset, random_split
 
 from sklearn.metrics import (
     accuracy_score,
@@ -22,7 +22,13 @@ from sklearn.metrics import (
 # SETTINGS
 # ============================================================
 
-DATASET_PATH = r"C:\Users\h1shu\OneDrive\Desktop\ML_project\data\breast-cancer-us-classification-ml-4-im-2025-2026\complete_set\training_set"
+DATASET_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "data",
+    "breast-cancer-us-classification-ml-4-im-2025-2026",
+    "complete_set",
+    "training_set",
+)
 
 MODEL_PATH = "models/breast_cancer_efficientnet.pth"
 
@@ -193,9 +199,9 @@ test_size = (
 )
 
 
-train_dataset, validation_dataset, test_dataset = random_split(
+train_indices, validation_indices, test_indices = random_split(
 
-    full_dataset,
+    range(total_size),
 
     [
         train_size,
@@ -213,9 +219,25 @@ train_dataset, validation_dataset, test_dataset = random_split(
 # TEST DATA TRANSFORM
 # ============================================================
 
-validation_dataset.dataset.transform = test_transform
+evaluation_dataset = datasets.ImageFolder(
+    DATASET_PATH,
+    transform=test_transform
+)
 
-test_dataset.dataset.transform = test_transform
+train_dataset = Subset(
+    full_dataset,
+    train_indices.indices
+)
+
+validation_dataset = Subset(
+    evaluation_dataset,
+    validation_indices.indices
+)
+
+test_dataset = Subset(
+    evaluation_dataset,
+    test_indices.indices
+)
 
 
 print()
